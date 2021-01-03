@@ -10,48 +10,42 @@
  * The mqtt client pushes on the /pulseenergymonitor/# topics the:
  * - instant Watts measurements
  * - counted kWh (RAM)
- * - instant temperature of the board
  * NOTE: replace "<...>" fields with your data
  ***************************************************************************/
  
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoOTA.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
 
 
 /*#define DEBUG*/                 /* activates debug on serial line*/
 #define IN_PIN_PEM 18             /* input pin for pulse sensor */
-#define IN_PIN_TMP 2              /* input pin for DS18d20 temperature sensor */
 #define ISR_TYPE FALLING          /* isr triggering mode */
 #define HOUR 3600.0               /* hour as constant */
-#define PULSES_KWH_RES 0.5        /* 1 KW = 1000W, power meter has 2000 inpulses resolution */
-#define SECOUND_ISR_PERIOD 0.09   /* pulse period is ~90 ms, used to ignore secound interrupt arrival bug*/
+#define PULSES_KWH_RES 1.0        /* 1 KW = 1000W, power meter has 1000 inpulses resolution */
+#define SECOND_ISR_PERIOD 0.09   /* pulse period is ~90 ms, used to ignore second interrupt arrival bug*/
 #define MAX_POWER 7040            /* for a peek of 32A => 7040W, ignor higher measurements */
 
 /*mqtt declarations*/
-const char* mqtt_server = "<IP OF THE MQTT SERVER>";
-const char* mqtt_user = "<USER NAME>";
-const char* mqtt_password = "<PASSWORD>";
-const char* power_topic = "/pulseenergymonitor/watts";
-const char* kWh_topic = "/pulseenergymonitor/kWh";
-const char* tmp_topic = "/pulseenergymonitor/tmp";
-const char* cmd_topic = "/pulseenergymonitor/cmd";
-const char* lwt_topic = "/pulseenergymonitor/lwt";
+const char* mqtt_server = "HOSTNAME";
+const char* mqtt_user = "USER";
+const char* mqtt_password = "PASS";
+const char* power_topic = "sensors/pulseenergymonitor/watts";
+const char* kWh_topic = "sensors/pulseenergymonitor/kWh";
+const char* cmd_topic = "sensors/pulseenergymonitor/cmd";
+const char* lwt_topic = "sensors/pulseenergymonitor/lwt";
 const char* lwt_msg_off = "OFF";
 const char* lwt_msg_on = "ON";
 
 /* SSID and Password of WiFi router */
-const char* ssid = "<ROUTER SSID>";
-const char* password = "<ROUTER PASSWORD>";
+const char* ssid = "SSID";
+const char* password = "PASSWORD";
 
 
 /* variables an */
 WiFiClient espClient;
 PubSubClient client(espClient);
-OneWire ds(IN_PIN_TMP);
-DallasTemperature DS18B20(&ds); 
+
 
 const double MAX_DELAY = 60;              /*period after mqtt will send the zero value*/
 volatile double dPulsePeriod = 0.0;       /*period measured  between 2 impulses*/
@@ -61,7 +55,7 @@ volatile unsigned long ulStartTime = 0;   /*time measured when firts pulse from 
 volatile double dKWh=0.0;                 /*cumulative kWh*/
 volatile unsigned int uiIsrCount = 0;     /*counter to hold the number of measirements*/
 volatile double dTotalW = 0.0;            /*total Watts measured over a raporting cycle on mqtt*/
-unsigned int uiCount = 0;                 /*counter used to measure the secounds in the main loop*/
+unsigned int uiCount = 0;                 /*counter used to measure the seconds in the main loop*/
 
 
 /***********************************************************
@@ -77,13 +71,13 @@ void IRAM_ATTR isr()
       ulStartTime = millis();
       bPulseDetected = true;
   }
-  else  /*secound pulse, test if isr issue*/
+  else  /*SECOND pulse, test if isr issue*/
   {
-    /*time measured in secounds, from the last measurement*/
+    /*time measured in seconds, from the last measurement*/
     dPulsePeriod = (double)(millis()-ulStartTime)/1000.0; 
     
-    /*ignore, if period is shorther than pulse legth ~90ms*/
-    if (dPulsePeriod <= SECOUND_ISR_PERIOD)
+    /*ignore, if period is shorther than pulse length ~90ms*/
+    if (dPulsePeriod <= SECOND_ISR_PERIOD)
     {
       /*ignor measurement*/
       dPulsePeriod = 0.0;
@@ -159,17 +153,6 @@ void callback(char* topic, byte* payload, unsigned int length)
 
 }
 
-/***************************************
- * read temperature from DS18B20 sensor
-****************************************/
-float getTemperature() {
-  float tempC;
-  DS18B20.requestTemperatures(); 
-  tempC = DS18B20.getTempCByIndex(0);
-
-  return tempC;
-}
-
 
 /***************************************
  * init routine
@@ -186,9 +169,6 @@ void setup()
 
   /*attch function to isr routine*/
   attachInterrupt(IN_PIN_PEM, isr, ISR_TYPE);
-
-  /*init temparature sensor*/
-  DS18B20.begin();
 
   /*Connect to your WiFi router*/
   WiFi.begin(ssid, password);     
@@ -306,7 +286,6 @@ void loop()
     /*publis data over mqtt*/
     client.publish(power_topic, String(dPower).c_str(), true);
     client.publish(kWh_topic, String(dKWh).c_str(), true);
-    client.publish(tmp_topic, String(getTemperature()).c_str(), true);
     
     /*delete accumulated values, for new measurement*/
     dPower = 0.0;
@@ -330,7 +309,6 @@ void loop()
     /*no measurement, clear the values*/
     client.publish(power_topic, String(dPower).c_str(), true);
     client.publish(kWh_topic, String(dKWh).c_str(), true);
-    client.publish(tmp_topic, String(getTemperature()).c_str(), true); 
   }
 
   /*reconect on Mqtt loss*/
