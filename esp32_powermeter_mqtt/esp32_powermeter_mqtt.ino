@@ -271,12 +271,12 @@ void loop()
 #endif
 
   /*get time now*/
-  currentMillis = millis();
+  ulCurrentMillis = millis();
 
   /*check if elapsed seconds defined between sending mqtt updates*/
-  if (currentMillis - previousMillis >= (uiUpdate * 1000))
+  if (ulCurrentMillis - ulPreviousMillis >= (uiUpdate * 1000))
   {
-    previousMillis = currentMillis;
+    ulPreviousMillis = ulCurrentMillis;
 
     /*compute average of power*/
     dPower = dTotalW / uiIsrCount ;
