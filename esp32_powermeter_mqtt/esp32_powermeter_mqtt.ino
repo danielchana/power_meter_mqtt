@@ -21,15 +21,15 @@
 #define IN_PIN_PEM 18             /* input pin for pulse sensor */
 #define ISR_TYPE FALLING          /* isr triggering mode */
 #define HOUR 3600.0               /* hour as constant */
-#define PULSES_KWH_RES 1.0        /* 1 KW = 1000W, power meter has 1000 inpulses resolution */
-#define SECOND_ISR_PERIOD 0.09   /* pulse period is ~90 ms, used to ignore second interrupt arrival bug*/
-#define MAX_POWER 7040            /* for a peek of 32A => 7040W, ignor higher measurements */
+#define PULSES_KWH_RES 1000       /* power meter has 1000 inpulses resolution */
+#define SECOND_ISR_PERIOD 0.09    /* pulse period is ~90 ms, used to ignore second interrupt arrival bug*/
+#define MAX_POWER 7040            /* for a peek of 32A => 7040W, ignore higher measurements */
 
 /*mqtt declarations*/
 const unsigned int uiUpdate = 60;         /*seconds between sending mqtt updates*/
-const char* mqtt_server = "HOSTNAME";
-const char* mqtt_user = "USER";
-const char* mqtt_password = "PASS";
+const char* mqtt_server = "HOSTNAME or IP";
+const char* mqtt_user = "USER or BLANK";
+const char* mqtt_password = "PASSWORD or BLANK";
 const char* power_topic = "sensors/pulseenergymonitor/watts";
 const char* kWh_topic = "sensors/pulseenergymonitor/kWh";
 const char* cmd_topic = "sensors/pulseenergymonitor/cmd";
@@ -46,16 +46,16 @@ const char* password = "PASSWORD";
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-
-
 unsigned long ulPreviousMillis = 0;       /* will store last time the main loop run */
 unsigned long ulCurrentMillis = 0;        /* will store last time the main loop run */
+
 volatile double dPulsePeriod = 0.0;       /*period measured  between 2 impulses*/
+volatile unsigned long ulPulseCurrent = 0.0;  /* will store last time isr run*/
 volatile double dPower = 0.0;             /*instant power, in W*/
 volatile unsigned long ulStartTime = 0;   /*time measured when firts pulse from pulsed energy sensor fires*/
 volatile double dKWh = 0.0;               /*cumulative kWh*/
 volatile unsigned int uiIsrCount = 0;     /*counter to hold the number of measirements*/
-volatile double dTotalW = 0.0;            /*total Watts measured over a raporting cycle on mqtt*/
+volatile double dTotalW = 0.0;            /*total Watts measured over a reporting cycle on mqtt*/
 
 
 
@@ -68,7 +68,8 @@ void IRAM_ATTR isr()
 
   /*test if isr issue*/
   /*time measured in seconds, from the last measurement*/
-  dPulsePeriod = (double)(millis() - ulStartTime) / 1000.0;
+  ulPulseCurrent = millis();
+  dPulsePeriod = (double)(ulPulseCurrent - ulStartTime) / 1000.0;
 
   /*ignore, if period is shorther than pulse length ~90ms*/
   if (dPulsePeriod <= SECOND_ISR_PERIOD)
@@ -80,21 +81,33 @@ void IRAM_ATTR isr()
   else /*no interrupt issue, compute the power*/
   {
 
+    /*update current time for next interval measure*/
+    ulStartTime = ulPulseCurrent;
+
+    /*update number of interruptions in current mqtt period*/
     uiIsrCount++;
-    dPower = (PULSES_KWH_RES / (double)dPulsePeriod) * HOUR;
+
+    /*calculate instant power in the current pulse*/
+    dPower = ((1000 * HOUR) / PULSES_KWH_RES) / dPulsePeriod;
 
     /*filter wrong readings*/
     if (dPower > MAX_POWER)
     {
       /*reading error, reset power*/
+      /*to-do: why did we receive additional ISR pulse?*/
       dPower = 0.0;
+    
     }
 
     /*cumulative power*/
     dTotalW += dPower;
 
-    /*update kWh*/
-    dKWh += ((dPulsePeriod / HOUR) * (dPower / 1000.0));
+    /*here follows an alternate way of calculate cumulative kWh
+       if using this method, remove the dKWh calculation
+       from main loop:
+       dKWh = double(uiIsrCount) / PULSES_KWH_RES;
+    */
+    //dKWh += ((dPulsePeriod / HOUR) * (dPower / 1000.0));
 
   }
 
@@ -148,6 +161,7 @@ void callback(char* topic, byte* payload, unsigned int length)
 ****************************************/
 void setup()
 {
+
 #ifdef DEBUG
   Serial.begin(115200);
   Serial.println("Scanning...");
@@ -278,8 +292,19 @@ void loop()
   {
     ulPreviousMillis = ulCurrentMillis;
 
-    /*compute average of power*/
-    dPower = dTotalW / uiIsrCount ;
+    /*compute average of power, if any
+     * as well as kWh during last mqtt cycle update
+    */
+    if (uiIsrCount > 0)
+    {
+      dPower = dTotalW / uiIsrCount;
+      dKWh = double(uiIsrCount) / PULSES_KWH_RES;
+    }
+    else
+    {
+      dPower = 0;
+      dKWh = 0;
+    }
 
     /*publish data over mqtt*/
     client.publish(power_topic, String(dPower).c_str(), true);
