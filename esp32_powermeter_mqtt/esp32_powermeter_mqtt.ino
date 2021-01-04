@@ -1,18 +1,17 @@
 /***************************************************************************
- * Power Meter - for devices with pulse output 
- * 
- * Host device is an ESP32 WROOM 32 board
- * A DS18d20 sensor delivers accurate temperature manasurements  
- * 
- * The device is connected to WiFi, enableing (simple) OTA 
- * updates over Arduino IDE.
- * 
- * The mqtt client pushes on the /pulseenergymonitor/# topics the:
- * - instant Watts measurements
- * - counted kWh (RAM)
- * NOTE: replace "<...>" fields with your data
+   Power Meter - for devices with pulse output
+
+   Host device is an ESP32 WROOM 32 board
+
+   The device is connected to WiFi, enabling (simple) OTA
+   updates over Arduino IDE.
+
+   The mqtt client pushes on the sensors/pulseenergymonitor/# topics the:
+   - instant Watts measurements
+   - counted kWh (RAM)
+   NOTE: replace "<...>" fields with your data
  ***************************************************************************/
- 
+
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoOTA.h>
@@ -27,6 +26,7 @@
 #define MAX_POWER 7040            /* for a peek of 32A => 7040W, ignor higher measurements */
 
 /*mqtt declarations*/
+const unsigned int uiUpdate = 60;         /*seconds between sending mqtt updates*/
 const char* mqtt_server = "HOSTNAME";
 const char* mqtt_user = "USER";
 const char* mqtt_password = "PASS";
@@ -47,75 +47,64 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 
 
-const double MAX_DELAY = 60;              /*period after mqtt will send the zero value*/
+
+unsigned long ulPreviousMillis = 0;       /* will store last time the main loop run */
+unsigned long ulCurrentMillis = 0;        /* will store last time the main loop run */
 volatile double dPulsePeriod = 0.0;       /*period measured  between 2 impulses*/
 volatile double dPower = 0.0;             /*instant power, in W*/
-volatile boolean bPulseDetected = false;  /*first pulse detetcted*/
 volatile unsigned long ulStartTime = 0;   /*time measured when firts pulse from pulsed energy sensor fires*/
-volatile double dKWh=0.0;                 /*cumulative kWh*/
+volatile double dKWh = 0.0;               /*cumulative kWh*/
 volatile unsigned int uiIsrCount = 0;     /*counter to hold the number of measirements*/
 volatile double dTotalW = 0.0;            /*total Watts measured over a raporting cycle on mqtt*/
-unsigned int uiCount = 0;                 /*counter used to measure the seconds in the main loop*/
+
 
 
 /***********************************************************
- * interrupt routine, 
- * used to measure the pulse length and calculate the power
+   interrupt routine,
+   used to measure the pulse length and calculate the power
 ************************************************************/
 void IRAM_ATTR isr()
 {
-  /*test if first pulse arrived*/
-  if (bPulseDetected == false)
+
+  /*test if isr issue*/
+  /*time measured in seconds, from the last measurement*/
+  dPulsePeriod = (double)(millis() - ulStartTime) / 1000.0;
+
+  /*ignore, if period is shorther than pulse length ~90ms*/
+  if (dPulsePeriod <= SECOND_ISR_PERIOD)
   {
-      /*get current time*/
-      ulStartTime = millis();
-      bPulseDetected = true;
-  }
-  else  /*SECOND pulse, test if isr issue*/
-  {
-    /*time measured in seconds, from the last measurement*/
-    dPulsePeriod = (double)(millis()-ulStartTime)/1000.0; 
-    
-    /*ignore, if period is shorther than pulse length ~90ms*/
-    if (dPulsePeriod <= SECOND_ISR_PERIOD)
-    {
-      /*ignor measurement*/
-      dPulsePeriod = 0.0;
-
-    }
-    else /*no interrupt issue, compute the power*/
-    {
-
-      uiIsrCount++;
-      dPower = (PULSES_KWH_RES/(double)dPulsePeriod)*HOUR;
-
-      /*filter wrong readings*/
-      if (dPower > MAX_POWER)
-      {
-        /*reading error, reset power*/
-        dPower = 0.0;
-        
-      }
-
-      /*cumulative power*/
-      dTotalW += dPower;
-        
-      /*update kWh*/
-      dKWh += ((dPulsePeriod/HOUR)*(dPower/1000.0));
-      
-      /*reset pulse detection, so new measurement can occure*/
-      bPulseDetected = false;
-
-    }
+    /*ignor measurement*/
+    dPulsePeriod = 0.0;
 
   }
+  else /*no interrupt issue, compute the power*/
+  {
+
+    uiIsrCount++;
+    dPower = (PULSES_KWH_RES / (double)dPulsePeriod) * HOUR;
+
+    /*filter wrong readings*/
+    if (dPower > MAX_POWER)
+    {
+      /*reading error, reset power*/
+      dPower = 0.0;
+    }
+
+    /*cumulative power*/
+    dTotalW += dPower;
+
+    /*update kWh*/
+    dKWh += ((dPulsePeriod / HOUR) * (dPower / 1000.0));
+
+  }
+
 }
 
 /***********************************************
- * MQTT receiver callback
- * coomad list, on /pulseenergymonitor/cmd
- * c - clear RAM stored kWh
- * r - reset the system
+   MQTT receiver callback
+   coomad list, on sensors/pulseenergymonitor/cmd
+   c - clear RAM stored kWh
+   r - reset the system
 ************************************************/
 void callback(char* topic, byte* payload, unsigned int length)
 {
@@ -125,7 +114,7 @@ void callback(char* topic, byte* payload, unsigned int length)
   Serial.println(topic);
   Serial.print("Message ");
 
-  for(int i = 0; i < length; i++) 
+  for (int i = 0; i < length; i++)
   {
     Serial.print((char)payload[i]);
   }
@@ -137,7 +126,7 @@ void callback(char* topic, byte* payload, unsigned int length)
   if ((char)payload[0] == 'c')
   {
     /*reset kWh counter*/
-    dKWh = 0.0;  
+    dKWh = 0.0;
   }
   else if ((char)payload[0] == 'r')
   {
@@ -155,9 +144,9 @@ void callback(char* topic, byte* payload, unsigned int length)
 
 
 /***************************************
- * init routine
+   init routine
 ****************************************/
-void setup() 
+void setup()
 {
 #ifdef DEBUG
   Serial.begin(115200);
@@ -167,17 +156,21 @@ void setup()
   /*set pin as output*/
   pinMode(IN_PIN_PEM, INPUT_PULLDOWN);
 
-  /*attch function to isr routine*/
+  /*attach function to isr routine*/
   attachInterrupt(IN_PIN_PEM, isr, ISR_TYPE);
 
+  /*get current time for temporary variables*/
+  ulStartTime = millis();
+  ulPreviousMillis = ulStartTime;
+
   /*Connect to your WiFi router*/
-  WiFi.begin(ssid, password);     
+  WiFi.begin(ssid, password);
 #ifdef DEBUG
   Serial.println("");
 #endif
 
   /*Wait for connection*/
-  while (WiFi.status() != WL_CONNECTED) 
+  while (WiFi.status() != WL_CONNECTED)
   {
     delay(500);
 #ifdef DEBUG
@@ -191,17 +184,17 @@ void setup()
   client.setCallback(callback);
 
   /*connect to mqtt server, retry if needed*/
-  while (!client.connected()) 
+  while (!client.connected())
   {
 #ifdef DEBUG
     Serial.println("Connecting to MQTT...");
 #endif
-    if(client.connect("pulseenergymonitor", mqtt_user, mqtt_password,lwt_topic,0,0,lwt_msg_off )) 
+    if (client.connect("pulseenergymonitor", mqtt_user, mqtt_password, lwt_topic, 0, 0, lwt_msg_off ))
     {
 #ifdef DEBUG
-     Serial.println("Connected to MQTT");
+      Serial.println("Connected to MQTT");
 #endif
-     client.publish(lwt_topic, lwt_msg_on, true);
+      client.publish(lwt_topic, lwt_msg_on, true);
     }
     else
     {
@@ -217,37 +210,37 @@ void setup()
   client.subscribe(cmd_topic);
 
   /*OTA*/
-    ArduinoOTA
-    .onStart([]() {
-      String type;
-      if (ArduinoOTA.getCommand() == U_FLASH)
-        type = "sketch";
-      else /* U_SPIFFS*/
-        type = "filesystem";
+  ArduinoOTA
+  .onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH)
+      type = "sketch";
+    else /* U_SPIFFS*/
+      type = "filesystem";
 #ifdef DEBUG
-      Serial.println("Start updating " + type);
+    Serial.println("Start updating " + type);
 #endif
-    })
-    .onEnd([]() {
+  })
+  .onEnd([]() {
 #ifdef DEBUG
-      Serial.println("\nEnd");
+    Serial.println("\nEnd");
 #endif
-    })
-    .onProgress([](unsigned int progress, unsigned int total) {
+  })
+  .onProgress([](unsigned int progress, unsigned int total) {
 #ifdef DEBUG
-      Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
 #endif
-    })
-    .onError([](ota_error_t error) {
+  })
+  .onError([](ota_error_t error) {
 #ifdef DEBUG
-      Serial.printf("Error[%u]: ", error);
-      if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-      else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
 #endif
-    });
+  });
 
   ArduinoOTA.begin();
 
@@ -256,15 +249,15 @@ void setup()
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 #endif
-  
-  
+
+
 }
 
 
 /*********************************
- * Main loop
+   Main loop
 **********************************/
-void loop() 
+void loop()
 {
 
   client.loop();
@@ -277,55 +270,42 @@ void loop()
   Serial.printf("\n");
 #endif
 
-  /*run if we have a measurement*/
-  if (dTotalW > 0.0)
+  /*get time now*/
+  currentMillis = millis();
+
+  /*check if elapsed seconds defined between sending mqtt updates*/
+  if (currentMillis - previousMillis >= (uiUpdate * 1000))
   {
-    /*compute average*/
+    previousMillis = currentMillis;
+
+    /*compute average of power*/
     dPower = dTotalW / uiIsrCount ;
 
-    /*publis data over mqtt*/
+    /*publish data over mqtt*/
     client.publish(power_topic, String(dPower).c_str(), true);
     client.publish(kWh_topic, String(dKWh).c_str(), true);
-    
-    /*delete accumulated values, for new measurement*/
+
+    /*delete accumulated values, for new mqtt update*/
     dPower = 0.0;
     dTotalW = 0.0;
     uiIsrCount = 0;
-
-    /*reset cycle counter */
-    uiCount=1;
-
+    dKWh = 0.0;
   }
 
-
-  /*when timeout on measurement, clear mqtt values*/
-  if (((uiCount % (uint (MAX_DELAY))) == 0))
-  {
-    dPower = 0.0;
-    dPulsePeriod = 0.0;
-    dTotalW = 0.0;
-    uiIsrCount = 0.0;
-
-    /*no measurement, clear the values*/
-    client.publish(power_topic, String(dPower).c_str(), true);
-    client.publish(kWh_topic, String(dKWh).c_str(), true);
-  }
 
   /*reconect on Mqtt loss*/
-  if (client.state()< 0)
+  if (client.state() < 0)
   {
 #ifdef DEBUG
     Serial.println("No MQTT Connection, reconnect");
 #endif
 
     delay (3000);
-    setup();  
+    setup();
   }
 
   /*wait, time base for checking the measurements*/
   delay(1000);
 
-  /*increment cycle counter */
-  uiCount++;
-  
+
 }
